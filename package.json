@@ -5,7 +5,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.99.1"
+    "@supabase/supabase-js": "^2.99.1",
+    "pdfjs-dist": "^5.7.284"
   },
   "devDependencies": {
     "vite": "^8.0.0"

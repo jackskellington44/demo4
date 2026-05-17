@@ -1,0 +1,68 @@
+/* ============================================ */
+/* base.css — CSS variables & reset (0.0 – 0.1)     */
+/* ============================================ */
+
+
+/* ============================================ */
+/* 0.0 ROOT VARIABLES                          */
+/* ============================================ */
+
+:root {
+    /* =============================================
+     * CUSTOMIZATION â€” change these to theme the site
+     * =============================================
+     *
+     * Font:
+     *   1. Add a <link> to your font in index.html, e.g.
+     *      <link href="https://fonts.googleapis.com/css2?family=Inter&display=swap" rel="stylesheet">
+     *   2. Update --font-family below.
+     *
+     * Background:
+     *   Swap --bg-url to any image path or CSS gradient,
+     *   e.g. url("./images/my-bg.jpg") or linear-gradient(135deg, #0f0c29, #302b63).
+     * ============================================= */
+    --font-family:    Arial, Helvetica, sans-serif;
+    --bg-url:         url("./images/background.jpg");
+
+    /* Font scale */
+    --font-size-base: 0.875rem;
+    --font-size-sm:   1rem;
+    --font-size-md:   1.5rem;
+    --font-size-lg:   2rem;
+    --font-size-xl:   2.5rem;
+    --font-size-2xl:  3rem;
+    --font-size-3xl:  4rem;
+    --font-size-4xl:  5rem;
+    --font-size-5xl:  6.25rem;
+    --font-size-responsive: clamp(2rem, 8vw, 6.25rem);
+    --font-size-button:     clamp(1.5rem, 5vw, 5rem);
+    --font-size-pfp-plus:   clamp(2rem, 4vw, 3.125rem);
+
+    /* Layout */
+    --notif-bar-w:   20px;
+    --notif-panel-w: 20%;
+    --profile-w:     20%;
+
+    /* Post card typography */
+    --post-title-size:  var(--font-size-xl);
+    --post-body-size:   var(--font-size-md);
+    --post-footer-size: var(--font-size-lg);
+}
+
+/* ============================================ */
+/* 0.1 RESET / BASE STYLES                     */
+/* ============================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-family);
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+}
+

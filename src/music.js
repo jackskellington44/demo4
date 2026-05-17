@@ -1,6 +1,29 @@
+// ============================================
+// MUSIC.JS FILE MAP
+// 0. IMPORTS
+// 1. STATE
+// 2. AUDIO INSTANCE
+// 3. DOM REFERENCES
+// 4. HELPERS
+// 5. LOAD TRACKS
+// 6. RENDER PLAYLIST
+// 7. EDIT MODE HELPERS
+// 8. PLAYBACK
+// 9. BAR POSITION
+// 10. UPLOAD
+// 11. DELETE
+// 12. DOWNLOAD PLAYLIST
+// 13. PUBLIC INIT
+// ============================================
+
+// ============================================
+// 0. IMPORTS
+// ============================================
 import { supabase } from './supabase-config.js';
 
-// ── State ──────────────────────────────────────────────────────────────────
+// ============================================
+// 1. STATE
+// ============================================
 let tracks       = [];
 let currentIndex = -1;
 let isPlaying    = false;
@@ -8,22 +31,45 @@ let currentUser     = null;
 let currentUserData = null;
 let barPosition  = localStorage.getItem('musicBarPosition') || 'bottom';
 let isShuffled = false;
-let isLooping  = false;
+const LOOP_MODE_OFF = 'off';
+const LOOP_MODE_TRACK = 'track';
+const LOOP_MODE_PLAYLIST = 'playlist';
+let loopMode = LOOP_MODE_OFF;
 let isMusicEditMode = false;
+let isMusicInitialized = false;
+let scWidget = null;
+let scWidgetIframe = null;
+let scWidgetReady = false;
+let scApiLoaded = false;
+let scPendingAutoPlay = false;
+let isUsingSoundCloudWidget = false;
+let suppressAudioEnded = false;
+let scCurrentDurationMs = 0;
+let currentVolume = Number(localStorage.getItem('musicVolume') || '0.8');
+let lastNonZeroVolume = 0.8;
 
 const MUSIC_DBLCLICK_MS = 400;
+const MUSIC_DEFAULT_VOLUME = 0.8;
 
+// ============================================
+// 2. AUDIO INSTANCE
+// ============================================
 const audio = new Audio();
 audio.preload = 'none';
 
-// ── DOM refs ───────────────────────────────────────────────────────────────
+// ============================================
+// 3. DOM REFERENCES
+// ============================================
 let musicBar, musicBarPfp, musicBarUsername, musicBarTitle, musicBarArtist, musicBarSep;
 let musicPrev, musicPlayPause, musicNext, musicOpenPanel;
 let musicPanelOverlay, musicPanelTitle, musicTrackList, musicDropZone;
 let musicDownloadPlaylist, musicClosePanel;
 let musicShuffle, musicLoop;
+let musicVolumeWrap, musicVolumeBtn, musicVolumeSlider;
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ============================================
+// 4. HELPERS
+// ============================================
 function getPlaylistTitle() {
   const month = new Date().toLocaleString('default', { month: 'long' }).toLowerCase();
   return `monkey ${month} music`;
@@ -43,7 +89,324 @@ function escAttr(str) {
     .replace(/>/g, '&gt;');
 }
 
-// ── Load ───────────────────────────────────────────────────────────────────
+function normalizeSoundCloudUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return String(rawUrl || '').trim();
+  }
+}
+
+function clampVolume(value) {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) return MUSIC_DEFAULT_VOLUME;
+  return Math.min(1, Math.max(0, numeric));
+}
+
+function getTrackAudioUrl(track) {
+  return track?.stream_url || track?.file_url || '';
+}
+
+function normalizeTrackMetadata(rawTitle, rawArtist) {
+  let title = String(rawTitle || '').trim() || 'Untitled';
+  let artist = String(rawArtist || '').trim();
+
+  // SoundCloud oEmbed titles are often "Song by Artist"; split this so UI doesn't duplicate artist.
+  const byMatch = title.match(/^(.*)\s+by\s+(.+)$/i);
+  if (byMatch) {
+    const splitTitle = byMatch[1].trim();
+    const splitArtist = byMatch[2].trim();
+    const normalizedArtist = artist.toLowerCase();
+
+    if (!artist) {
+      title = splitTitle || title;
+      artist = splitArtist;
+    } else if (normalizedArtist === splitArtist.toLowerCase()) {
+      title = splitTitle || title;
+    }
+  }
+
+  return { title, artist };
+}
+
+function getTrackDisplayMeta(track) {
+  return normalizeTrackMetadata(track?.title, track?.artist);
+}
+
+function getRandomTrackIndexExcept(excludedIndex) {
+  if (tracks.length === 0) return -1;
+  if (tracks.length === 1) return 0;
+
+  let next = excludedIndex;
+  while (next === excludedIndex) {
+    next = Math.floor(Math.random() * tracks.length);
+  }
+  return next;
+}
+
+function getNextTrackIndex() {
+  if (tracks.length === 0) return -1;
+
+  if (isShuffled) {
+    return getRandomTrackIndexExcept(currentIndex);
+  }
+
+  const baseIndex = currentIndex < 0 ? 0 : currentIndex + 1;
+  if (baseIndex < tracks.length) return baseIndex;
+
+  return loopMode === LOOP_MODE_PLAYLIST ? 0 : -1;
+}
+
+function getPreviousTrackIndex() {
+  if (tracks.length === 0) return -1;
+
+  if (isShuffled) {
+    return getRandomTrackIndexExcept(currentIndex);
+  }
+
+  if (currentIndex > 0) return currentIndex - 1;
+  return loopMode === LOOP_MODE_PLAYLIST ? tracks.length - 1 : -1;
+}
+
+function isCurrentAudioTrackLoaded(track) {
+  const trackUrl = getTrackAudioUrl(track);
+  if (!trackUrl) return false;
+
+  const currentSrc = audio.currentSrc || audio.src || '';
+  return currentSrc === trackUrl || currentSrc.includes(trackUrl);
+}
+
+function updateVolumeUi() {
+  if (musicVolumeSlider) {
+    musicVolumeSlider.value = String(Math.round(currentVolume * 100));
+  }
+
+  if (musicVolumeBtn) {
+    musicVolumeBtn.textContent = currentVolume === 0 ? 'mute' : 'vol';
+    musicVolumeBtn.classList.toggle('active', currentVolume > 0);
+  }
+}
+
+function setPlaybackVolume(volume, { persist = true } = {}) {
+  currentVolume = clampVolume(volume);
+  audio.volume = currentVolume;
+
+  if (currentVolume > 0) {
+    lastNonZeroVolume = currentVolume;
+  }
+
+  if (scWidget) {
+    scWidget.setVolume(Math.round(currentVolume * 100));
+  }
+
+  if (persist) {
+    localStorage.setItem('musicVolume', String(currentVolume));
+  }
+
+  updateVolumeUi();
+}
+
+function restartCurrentTrack() {
+  if (currentIndex < 0 || currentIndex >= tracks.length) return;
+
+  const track = tracks[currentIndex];
+  const isCurrentTrackSoundCloud = !!track?.soundcloud_url;
+
+  if (isCurrentTrackSoundCloud && scWidget && isUsingSoundCloudWidget) {
+    scWidget.seekTo(0);
+    scWidget.play();
+    isPlaying = true;
+    updateBarDisplay();
+    return;
+  }
+
+  if (!isCurrentAudioTrackLoaded(track)) {
+    playTrack(currentIndex);
+    return;
+  }
+
+  audio.currentTime = 0;
+  audio.play()
+    .then(() => {
+      isPlaying = true;
+      updateBarDisplay();
+    })
+    .catch((err) => {
+      console.error('Repeat-one restart failed, reloading track:', err);
+      playTrack(currentIndex);
+    });
+}
+
+function advanceToNextTrack({ fromEnded = false } = {}) {
+  if (tracks.length === 0) {
+    isPlaying = false;
+    currentIndex = -1;
+    updateBarDisplay();
+    return;
+  }
+
+  if (fromEnded && loopMode === LOOP_MODE_TRACK && currentIndex >= 0) {
+    restartCurrentTrack();
+    return;
+  }
+
+  const next = getNextTrackIndex();
+  if (next === -1) {
+    isPlaying = false;
+    currentIndex = -1;
+    updateBarDisplay();
+    return;
+  }
+
+  playTrack(next);
+}
+
+function updatePlaybackModeButtons() {
+  if (musicShuffle) {
+    musicShuffle.classList.toggle('active', isShuffled);
+    musicShuffle.title = isShuffled ? 'shuffle: on' : 'shuffle: off';
+    musicShuffle.setAttribute('aria-label', musicShuffle.title);
+  }
+
+  if (musicLoop) {
+    const isRepeatOn = loopMode !== LOOP_MODE_OFF;
+    musicLoop.classList.toggle('active', isRepeatOn);
+
+    if (loopMode === LOOP_MODE_TRACK) {
+      musicLoop.textContent = '↺1';
+      musicLoop.title = 'repeat: song';
+    } else if (loopMode === LOOP_MODE_PLAYLIST) {
+      musicLoop.textContent = '↺all';
+      musicLoop.title = 'repeat: playlist';
+    } else {
+      musicLoop.textContent = '↺';
+      musicLoop.title = 'repeat: off';
+    }
+
+    musicLoop.setAttribute('aria-label', musicLoop.title);
+  }
+}
+
+function loadSoundCloudApi() {
+  if (scApiLoaded && window.SC?.Widget) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-soundcloud-widget="1"]');
+    if (existing) {
+      existing.addEventListener('load', () => {
+        scApiLoaded = true;
+        resolve();
+      }, { once: true });
+      existing.addEventListener('error', () => reject(new Error('Failed to load SoundCloud Widget API')), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://w.soundcloud.com/player/api.js';
+    script.async = true;
+    script.dataset.soundcloudWidget = '1';
+    script.onload = () => {
+      scApiLoaded = true;
+      resolve();
+    };
+    script.onerror = () => reject(new Error('Failed to load SoundCloud Widget API'));
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureSoundCloudWidget() {
+  if (scWidget && scWidgetReady) return;
+
+  await loadSoundCloudApi();
+
+  if (!scWidgetIframe) {
+    const bootstrapTrack = 'https://soundcloud.com/forss/flickermood';
+    scWidgetIframe = document.createElement('iframe');
+    scWidgetIframe.id = 'musicSoundCloudWidget';
+    scWidgetIframe.title = 'SoundCloud widget';
+    scWidgetIframe.src = `https://w.soundcloud.com/player/?url=${encodeURIComponent(bootstrapTrack)}`;
+    scWidgetIframe.width = '1';
+    scWidgetIframe.height = '1';
+    scWidgetIframe.allow = 'autoplay; encrypted-media';
+    scWidgetIframe.style.position = 'fixed';
+    scWidgetIframe.style.left = '-9999px';
+    scWidgetIframe.style.top = '-9999px';
+    scWidgetIframe.style.border = '0';
+    document.body.appendChild(scWidgetIframe);
+  }
+
+  if (!scWidget) {
+    scWidget = window.SC.Widget(scWidgetIframe);
+    scWidget.bind(window.SC.Widget.Events.READY, () => {
+      scWidgetReady = true;
+      setPlaybackVolume(currentVolume, { persist: false });
+      if (scPendingAutoPlay) {
+        scPendingAutoPlay = false;
+        scWidget.play();
+      }
+    });
+    scWidget.bind(window.SC.Widget.Events.PLAY, () => {
+      isPlaying = true;
+      isUsingSoundCloudWidget = true;
+      scWidget.getDuration((ms) => {
+        scCurrentDurationMs = Number(ms) || 0;
+      });
+      updateBarDisplay();
+    });
+    scWidget.bind(window.SC.Widget.Events.PAUSE, () => {
+      isPlaying = false;
+      updateBarDisplay();
+    });
+    scWidget.bind(window.SC.Widget.Events.FINISH, () => {
+      // Many licensed tracks are preview-only on SoundCloud embeds.
+      if (scCurrentDurationMs > 0 && scCurrentDurationMs < 30000) {
+        alert('This SoundCloud track appears to be preview-only in embeds. Try another link.');
+      }
+      advanceToNextTrack({ fromEnded: true });
+    });
+    scWidget.bind(window.SC.Widget.Events.ERROR, () => {
+      isPlaying = false;
+      updateBarDisplay();
+      alert('SoundCloud could not play this track. Try another link.');
+    });
+  }
+}
+
+async function playSoundCloudTrack(soundcloudUrl) {
+  if (!soundcloudUrl) throw new Error('Missing SoundCloud URL');
+  const normalizedUrl = normalizeSoundCloudUrl(soundcloudUrl);
+  await ensureSoundCloudWidget();
+  scWidgetReady = false;
+  scCurrentDurationMs = 0;
+  scPendingAutoPlay = true;
+  scWidget.load(normalizedUrl, {
+    auto_play: true,
+    buying: false,
+    sharing: false,
+    download: false,
+    show_artwork: false,
+    show_comments: false,
+    show_playcount: false,
+    show_user: false,
+    visual: false
+  });
+}
+
+function stopAllPlayback() {
+  if (isUsingSoundCloudWidget && scWidget) {
+    scWidget.pause();
+  }
+  if (!audio.paused) {
+    audio.pause();
+  }
+}
+
+// ============================================
+// 5. LOAD TRACKS
+// ============================================
 export async function loadTracks() {
   const { data, error } = await supabase
     .from('music_tracks')
@@ -65,7 +428,9 @@ export async function loadTracks() {
 
   tracks = (data || []).map(t => ({ ...t, users: userMap[t.user_id] || null }));
 
-  if (currentIndex === -1 && tracks.length > 0) {
+  if (tracks.length === 0) {
+    currentIndex = -1;
+  } else if (currentIndex < 0 || currentIndex >= tracks.length) {
     currentIndex = 0;
   }
 
@@ -73,7 +438,9 @@ export async function loadTracks() {
   updateBarDisplay();
 }
 
-// ── Render playlist ────────────────────────────────────────────────────────
+// ============================================
+// 6. RENDER PLAYLIST
+// ============================================
 function renderTrackList() {
   if (!musicTrackList) return;
   musicTrackList.innerHTML = '';
@@ -85,7 +452,7 @@ function renderTrackList() {
 
   if (visibleTracks.length === 0) {
     musicTrackList.innerHTML = `<div class="music-empty">${
-      isMusicEditMode ? 'no tracks to edit' : 'no tracks yet — drag a file above'
+      isMusicEditMode ? 'no tracks to edit' : 'no tracks yet — add a soundcloud link above'
     }</div>`;
     return;
   }
@@ -93,6 +460,7 @@ function renderTrackList() {
   visibleTracks.forEach((track) => {
     const idx      = tracks.indexOf(track);
     const isActive = idx === currentIndex;
+    const displayMeta = getTrackDisplayMeta(track);
 
     const row = document.createElement('div');
     row.className   = `music-track-row${isActive ? ' active' : ''}${isMusicEditMode ? ' edit-mode' : ''}`;
@@ -100,31 +468,17 @@ function renderTrackList() {
     row.dataset.trackId = track.id;
 
     if (isMusicEditMode) {
-      // ── Edit-mode row: inline inputs + delete button ──
+      // ── Edit-mode row: delete button only (no rename) ──
       row.innerHTML = `
         <img class="music-track-pfp" src="${pfpSrcFor(track.users)}" alt="">
         <div class="music-track-info">
-          <input class="music-rename-input music-rename-title"
-                 value="${escAttr(track.title)}" placeholder="title">
-          <input class="music-rename-input music-rename-artist"
-                 value="${escAttr(track.artist || '')}" placeholder="artist">
+          <span class="music-track-title">${escAttr(displayMeta.title)}</span>
+          ${displayMeta.artist ? `<span class="music-track-artist">${escAttr(displayMeta.artist)}</span>` : ''}
         </div>
         <div class="music-track-actions">
           <button class="music-track-btn music-delete-btn">delete</button>
         </div>
       `;
-
-      // Inputs: stop row-click bubbling; Enter = save this track
-      row.querySelectorAll('.music-rename-input').forEach(input => {
-        input.addEventListener('click', e => e.stopPropagation());
-        input.addEventListener('keydown', async (e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            await saveTrackRename(track, row);
-            input.blur();
-          }
-        });
-      });
 
       row.querySelector('.music-delete-btn').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -139,8 +493,8 @@ function renderTrackList() {
       row.innerHTML = `
         <img class="music-track-pfp" src="${pfpSrcFor(track.users)}" alt="">
         <div class="music-track-info">
-          <span class="music-track-title">${escAttr(track.title)}</span>
-          ${track.artist ? `<span class="music-track-artist">${escAttr(track.artist)}</span>` : ''}
+          <span class="music-track-title">${escAttr(displayMeta.title)}</span>
+          ${displayMeta.artist ? `<span class="music-track-artist">${escAttr(displayMeta.artist)}</span>` : ''}
         </div>
       `;
 
@@ -151,45 +505,11 @@ function renderTrackList() {
   });
 }
 
-// ── Save a single track's rename inputs ───────────────────────────────────
-async function saveTrackRename(track, row) {
-  const titleInput  = row.querySelector('.music-rename-title');
-  const artistInput = row.querySelector('.music-rename-artist');
-  if (!titleInput) return;
-
-  const newTitle  = titleInput.value.trim()  || track.title;
-  const newArtist = artistInput.value.trim();
-
-  // Skip DB write if nothing changed
-  if (newTitle === track.title && newArtist === (track.artist || '')) return;
-
-  const { error } = await supabase
-    .from('music_tracks')
-    .update({ title: newTitle, artist: newArtist })
-    .eq('id', track.id)
-    .eq('user_id', currentUser.id);
-
-  if (error) { alert(`Rename failed: ${error.message}`); return; }
-
-  // Update local state so the bar display is fresh
-  track.title  = newTitle;
-  track.artist = newArtist;
-
-  // Reflect saved values back into the inputs
-  titleInput.value  = newTitle;
-  artistInput.value = newArtist;
-}
-
-// ── Exit edit mode — saves every modified row then re-renders ──────────────
+// ============================================
+// 7. EDIT MODE HELPERS
+// ============================================
+// Exit edit mode - no longer renames tracks (delete only)
 async function exitMusicEditMode() {
-  const rows = musicTrackList.querySelectorAll('.music-track-row[data-track-id]');
-  for (const row of rows) {
-    if (!row.querySelector('.music-rename-title')) continue;
-    const trackId = row.dataset.trackId;
-    const track   = tracks.find(t => String(t.id) === String(trackId));
-    if (track) await saveTrackRename(track, row);
-  }
-
   isMusicEditMode = false;
   const musicPanel = document.querySelector('.music-panel');
   if (musicPanel) musicPanel.classList.remove('edit-mode');
@@ -198,13 +518,46 @@ async function exitMusicEditMode() {
   updateBarDisplay();
 }
 
-// ── Playback ───────────────────────────────────────────────────────────────
-function playTrack(idx) {
+// ============================================
+// 8. PLAYBACK
+// ============================================
+async function playTrack(idx) {
   if (idx < 0 || idx >= tracks.length) return;
   currentIndex = idx;
-  audio.src = tracks[idx].file_url;
-  audio.play().catch(console.error);
-  isPlaying = true;
+  const track = tracks[idx];
+  suppressAudioEnded = true;
+  stopAllPlayback();
+  suppressAudioEnded = false;
+
+  if (track.soundcloud_url) {
+    try {
+      audio.pause();
+      audio.src = '';
+      await playSoundCloudTrack(track.soundcloud_url);
+      isUsingSoundCloudWidget = true;
+      isPlaying = true;
+    } catch (err) {
+      console.error('SoundCloud playback error:', err);
+      isUsingSoundCloudWidget = false;
+      isPlaying = false;
+      alert('Could not start SoundCloud playback.');
+    }
+  } else if (track.stream_url || track.file_url) {
+    isUsingSoundCloudWidget = false;
+    audio.src = getTrackAudioUrl(track);
+    setPlaybackVolume(currentVolume, { persist: false });
+    try {
+      await audio.play();
+      isPlaying = true;
+    } catch (err) {
+      console.error(err);
+      isPlaying = false;
+      updateBarDisplay();
+    }
+  } else {
+    isPlaying = false;
+  }
+
   updateBarDisplay();
   renderTrackList();
 }
@@ -214,9 +567,10 @@ function updateBarDisplay() {
   const track = tracks[currentIndex];
 
   if (track) {
-    musicBarTitle.textContent    = track.title;
-    musicBarArtist.textContent   = track.artist || '';
-    musicBarSep.style.display    = track.artist ? 'inline' : 'none';
+    const displayMeta = getTrackDisplayMeta(track);
+    musicBarTitle.textContent    = displayMeta.title;
+    musicBarArtist.textContent   = displayMeta.artist;
+    musicBarSep.style.display    = displayMeta.artist ? 'inline' : 'none';
     musicBarPfp.src              = pfpSrcFor(track.users);
     musicBarUsername.textContent = track.users?.username || '—';
   } else {
@@ -230,7 +584,9 @@ function updateBarDisplay() {
   musicPlayPause.textContent = isPlaying ? '||' : '▷';
 }
 
-// ── Bar position ───────────────────────────────────────────────────────────
+// ============================================
+// 9. BAR POSITION
+// ============================================
 function applyBarPosition() {
   const BAR_H = '44px';
   if (barPosition === 'top') {
@@ -246,49 +602,62 @@ function applyBarPosition() {
   }
 }
 
-// ── Upload ─────────────────────────────────────────────────────────────────
-async function uploadTrack(file) {
-  const allowed = ['mp3', 'mp4', 'flac', 'wav', 'ogg', 'm4a', 'aac'];
-  const ext = file.name.split('.').pop().toLowerCase();
-  if (!allowed.includes(ext)) { alert(`Unsupported type: .${ext}`); return; }
+// ============================================
+// 10. SOUNDCLOUD URL HANDLER
+// ============================================
+async function addSoundCloudTrack(soundcloudUrl) {
+  const url = soundcloudUrl.trim();
+  if (!url) { alert('Please enter a SoundCloud URL'); return; }
+  const normalizedUrl = normalizeSoundCloudUrl(url);
 
-  const title    = file.name.replace(/\.[^.]+$/, '');
-  const filePath = `${currentUser.id}/${Date.now()}-${file.name}`;
+  const btn = document.getElementById('musicDownloadPlaylist');
+  btn.disabled = true;
 
-  musicDropZone.querySelector('span').textContent = `uploading ${file.name}…`;
+  try {
+    // Fetch metadata from SoundCloud oEmbed (no API key required)
+    const oembed = new URL('https://soundcloud.com/oembed');
+    oembed.searchParams.set('format', 'json');
+    oembed.searchParams.set('url', normalizedUrl);
 
-  const { error: upErr } = await supabase.storage
-    .from('group4-music')
-    .upload(filePath, file);
+    const oembedResp = await fetch(oembed.toString());
+    if (!oembedResp.ok) throw new Error(`oEmbed failed: ${oembedResp.status}`);
+    const oembedData = await oembedResp.json();
 
-  if (upErr) {
-    alert(`Upload failed: ${upErr.message}`);
-    musicDropZone.querySelector('span').textContent = 'upload music';
-    return;
+    const parsed = normalizeTrackMetadata(oembedData.title, oembedData.author_name || 'Unknown Artist');
+    const title = parsed.title;
+    const artist = parsed.artist;
+    const thumbnail = oembedData.thumbnail_url || '';
+
+    // Insert into Supabase (no stream_url - SoundCloud opens in new window)
+    const { error: dbErr } = await supabase
+      .from('music_tracks')
+      .insert([{
+        group_id: 'group4',
+        user_id:  currentUser.id,
+        title,
+        artist,
+        soundcloud_url: normalizedUrl,
+        thumbnail_url: thumbnail
+      }]);
+
+    if (dbErr) throw dbErr;
+
+    const urlInput = document.querySelector('input[placeholder="paste soundcloud link"]');
+    if (urlInput) urlInput.value = '';
+    await loadTracks();
+  } catch (error) {
+    console.error('SoundCloud add error:', error);
+    alert(`Failed to add track: ${error.message || error}`);
+  } finally {
+    btn.disabled = false;
   }
-
-  const { data: urlData } = supabase.storage
-    .from('group4-music')
-    .getPublicUrl(filePath);
-
-  const { error: dbErr } = await supabase
-    .from('music_tracks')
-    .insert([{
-      group_id: 'group4',
-      user_id:  currentUser.id,
-      title,
-      artist:   '',
-      file_url: urlData.publicUrl,
-      file_name: file.name
-    }]);
-
-  if (dbErr) { alert(`Failed to save track: ${dbErr.message}`); return; }
-
-  musicDropZone.querySelector('span').textContent = 'upload music';
-  await loadTracks();
 }
 
-// ── Delete ─────────────────────────────────────────────────────────────────
+
+
+// ============================================
+// 11. DELETE
+// ============================================
 async function deleteTrack(trackId, idx) {
   const { error } = await supabase
     .from('music_tracks')
@@ -299,9 +668,10 @@ async function deleteTrack(trackId, idx) {
   if (error) { alert(`Delete failed: ${error.message}`); return; }
 
   if (idx === currentIndex) {
-    audio.pause();
+    stopAllPlayback();
     audio.src = '';
     isPlaying    = false;
+    isUsingSoundCloudWidget = false;
     currentIndex = -1;
     updateBarDisplay();
   } else if (idx < currentIndex) {
@@ -311,55 +681,63 @@ async function deleteTrack(trackId, idx) {
   await loadTracks();
 }
 
-// ── Download playlist ──────────────────────────────────────────────────────
-async function downloadPlaylist() {
+// ============================================
+// 12. DOWNLOAD PLAYLIST AS CSV
+// ============================================
+async function downloadPlaylistAsCSV() {
   if (tracks.length === 0) { alert('No tracks to download'); return; }
 
+  const btn = document.getElementById('musicDownloadPlaylist');
   const title = getPlaylistTitle();
-  const btn   = document.getElementById('musicDownloadPlaylist');
 
   try {
-    const { default: JSZip } = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
-    const zip    = new JSZip();
-    const folder = zip.folder(title);
+    btn.textContent = '… exporting';
+    btn.disabled = true;
 
-    btn.textContent = '… zipping';
-    btn.disabled    = true;
+    // Build CSV with BOM for Excel compatibility
+    const BOM = '\uFEFF';
+    const headers = ['title', 'artist', 'soundcloud_url', 'thumbnail'];
+    let csv = BOM + headers.join(',') + '\n';
 
     for (const track of tracks) {
-      const resp = await fetch(track.file_url);
-      const blob = await resp.blob();
-      folder.file(track.file_name || `${track.title}.mp3`, blob);
+      const row = [
+        `"${(track.title || '').replace(/"/g, '""')}"`,
+        `"${(track.artist || '').replace(/"/g, '""')}"`,
+        `"${(track.soundcloud_url || '').replace(/"/g, '""')}"`,
+        `"${(track.thumbnail_url || '').replace(/"/g, '""')}"`
+      ].join(',');
+      csv += row + '\n';
     }
 
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    const a       = document.createElement('a');
-    a.href        = URL.createObjectURL(zipBlob);
-    a.download    = `${title}.zip`;
+    // Download CSV
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${title}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
+
+    alert(`Playlist exported: ${tracks.length} tracks.`);
   } catch (err) {
-    console.warn('JSZip unavailable, falling back to M3U:', err);
-    let m3u = '#EXTM3U\n';
-    tracks.forEach(t => {
-      m3u += `#EXTINF:-1,${t.artist ? t.artist + ' - ' : ''}${t.title}\n${t.file_url}\n`;
-    });
-    const blob = new Blob([m3u], { type: 'audio/x-mpegurl' });
-    const a    = document.createElement('a');
-    a.href     = URL.createObjectURL(blob);
-    a.download = `${title}.m3u`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    console.error('CSV export error:', err);
+    alert(`Export failed: ${err.message || err}`);
   } finally {
     btn.textContent = '⤓ playlist';
-    btn.disabled    = false;
+    btn.disabled = false;
   }
 }
 
-// ── Public init ────────────────────────────────────────────────────────────
+// ============================================
+// 13. PUBLIC INIT
+// ============================================
 export async function initMusic(user, userData) {
   currentUser     = user;
   currentUserData = userData;
+
+  if (isMusicInitialized) {
+    await loadTracks();
+    return;
+  }
 
   musicBar              = document.getElementById('musicBar');
   musicBarPfp           = document.getElementById('musicBarPfp');
@@ -379,12 +757,81 @@ export async function initMusic(user, userData) {
   musicClosePanel       = document.getElementById('musicClosePanel');
   musicShuffle = document.getElementById('musicShuffle');
   musicLoop    = document.getElementById('musicLoop');
+  const musicPanel = document.querySelector('.music-panel');
+
+  const requiredNodes = [
+    musicBar,
+    musicBarPfp,
+    musicBarUsername,
+    musicBarTitle,
+    musicBarArtist,
+    musicBarSep,
+    musicPrev,
+    musicPlayPause,
+    musicNext,
+    musicOpenPanel,
+    musicPanelOverlay,
+    musicPanelTitle,
+    musicTrackList,
+    musicDropZone,
+    musicDownloadPlaylist,
+    musicClosePanel,
+    musicShuffle,
+    musicLoop,
+    musicPanel
+  ];
+
+  if (requiredNodes.some((node) => !node)) {
+    console.error('Music UI initialization failed: missing required DOM elements.');
+    return;
+  }
+
+  isMusicInitialized = true;
 
   musicPanelTitle.textContent = getPlaylistTitle();
   applyBarPosition();
 
+  currentVolume = clampVolume(currentVolume);
+  if (currentVolume > 0) {
+    lastNonZeroVolume = currentVolume;
+  }
+  setPlaybackVolume(currentVolume, { persist: false });
+
+  musicVolumeWrap = document.createElement('div');
+  musicVolumeWrap.className = 'music-volume-wrap';
+
+  musicVolumeBtn = document.createElement('button');
+  musicVolumeBtn.className = 'music-ctrl-btn music-volume-btn';
+  musicVolumeBtn.type = 'button';
+
+  musicVolumeSlider = document.createElement('input');
+  musicVolumeSlider.className = 'music-volume-slider';
+  musicVolumeSlider.type = 'range';
+  musicVolumeSlider.min = '0';
+  musicVolumeSlider.max = '100';
+  musicVolumeSlider.step = '1';
+
+  musicVolumeWrap.appendChild(musicVolumeBtn);
+  musicVolumeWrap.appendChild(musicVolumeSlider);
+  musicBar.insertBefore(musicVolumeWrap, musicOpenPanel);
+
+  updateVolumeUi();
+  updatePlaybackModeButtons();
+
+  musicVolumeSlider.addEventListener('input', (e) => {
+    const nextVolume = Number(e.target.value) / 100;
+    setPlaybackVolume(nextVolume);
+  });
+
+  musicVolumeBtn.addEventListener('click', () => {
+    if (currentVolume === 0) {
+      setPlaybackVolume(lastNonZeroVolume || MUSIC_DEFAULT_VOLUME);
+    } else {
+      setPlaybackVolume(0);
+    }
+  });
+
   // ── Double right-click on music panel toggles edit mode ──
-  const musicPanel = document.querySelector('.music-panel');
   let lastMusicRightClick = 0;
 
   musicPanel.addEventListener('contextmenu', (e) => {
@@ -409,42 +856,60 @@ export async function initMusic(user, userData) {
 
   // ── Audio events ──
   audio.addEventListener('ended', () => {
-    if (isLooping) {
-      audio.play().catch(console.error);
-      return;
-    }
-    if (isShuffled) {
-      const next = Math.floor(Math.random() * tracks.length);
-      playTrack(next);
-      return;
-    }
-    const next = currentIndex + 1;
-    if (next < tracks.length) playTrack(next);
-    else { isPlaying = false; currentIndex = -1; updateBarDisplay(); }
+    if (suppressAudioEnded) return;
+    if (isUsingSoundCloudWidget) return;
+    advanceToNextTrack({ fromEnded: true });
   });
   audio.addEventListener('play',  () => { isPlaying = true;  updateBarDisplay(); });
   audio.addEventListener('pause', () => { isPlaying = false; updateBarDisplay(); });
 
   // ── Controls ──
   musicPrev.addEventListener('click', () => {
-    if (currentIndex > 0) playTrack(currentIndex - 1);
+    const prev = getPreviousTrackIndex();
+    if (prev !== -1) playTrack(prev);
   });
   musicNext.addEventListener('click', () => {
-    if (tracks.length === 0) return;
-    if (isShuffled) {
-      playTrack(Math.floor(Math.random() * tracks.length));
-    } else if (currentIndex < tracks.length - 1) {
-      playTrack(currentIndex + 1);
-    }
+    const next = getNextTrackIndex();
+    if (next !== -1) playTrack(next);
   });
   musicPlayPause.addEventListener('click', () => {
     if (tracks.length === 0) return;
-    if (isPlaying) {
-      audio.pause();
-    } else {
-      if (currentIndex === -1) playTrack(0);
-      else audio.play().catch(console.error);
+    if (currentIndex === -1) {
+      playTrack(0);
+      return;
     }
+
+    const currentTrack = tracks[currentIndex];
+    const isCurrentTrackSoundCloud = !!currentTrack?.soundcloud_url;
+
+    if (isPlaying) {
+      if (isCurrentTrackSoundCloud && scWidget) {
+        scWidget.pause();
+      } else {
+        audio.pause();
+      }
+      return;
+    }
+
+    if (isCurrentTrackSoundCloud) {
+      if (scWidget && isUsingSoundCloudWidget) {
+        scWidget.play();
+      } else {
+        playTrack(currentIndex);
+      }
+      return;
+    }
+
+    if (!isCurrentAudioTrackLoaded(currentTrack)) {
+      playTrack(currentIndex);
+      return;
+    }
+
+    audio.play().catch((err) => {
+      console.error(err);
+      isPlaying = false;
+      updateBarDisplay();
+    });
   });
 
   musicOpenPanel.addEventListener('click', () => {
@@ -468,37 +933,95 @@ export async function initMusic(user, userData) {
     }
   });
 
-  musicDownloadPlaylist.addEventListener('click', downloadPlaylist);
+  musicDownloadPlaylist.addEventListener('click', downloadPlaylistAsCSV);
 
-  // ── Drag & drop ──
-  musicDropZone.addEventListener('dragover',  (e) => { e.preventDefault(); musicDropZone.classList.add('drag-over'); });
-  musicDropZone.addEventListener('dragleave', ()  => { musicDropZone.classList.remove('drag-over'); });
-  musicDropZone.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    musicDropZone.classList.remove('drag-over');
-    for (const file of [...e.dataTransfer.files]) await uploadTrack(file);
+  // ── SoundCloud quick controls ──
+  const buttonRow = document.createElement('div');
+  buttonRow.className = 'music-link-controls';
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'music-link-btn';
+  addBtn.textContent = 'add track';
+
+  const addInput = document.createElement('input');
+  addInput.type = 'text';
+  addInput.className = 'music-link-inline-input';
+  addInput.placeholder = 'paste soundcloud link + enter';
+
+  const searchBtn = document.createElement('button');
+  searchBtn.type = 'button';
+  searchBtn.className = 'music-link-btn';
+  searchBtn.textContent = 'search';
+
+  buttonRow.appendChild(addBtn);
+  buttonRow.appendChild(addInput);
+  buttonRow.appendChild(searchBtn);
+
+  function showAddInput() {
+    addBtn.classList.add('hidden');
+    addInput.classList.add('is-visible');
+    addInput.focus();
+  }
+
+  function hideAddInput() {
+    addInput.value = '';
+    addInput.classList.remove('is-visible');
+    addBtn.classList.remove('hidden');
+  }
+
+  // Replace drop zone content with quick controls
+  musicDropZone.innerHTML = '';
+  musicDropZone.appendChild(buttonRow);
+
+  addBtn.addEventListener('click', () => {
+    showAddInput();
   });
 
-  // ── Click to browse ──
-  musicDropZone.addEventListener('click', () => {
-    const input  = document.createElement('input');
-    input.type   = 'file';
-    input.accept = '.mp3,.mp4,.flac,.wav,.ogg,.m4a,.aac';
-    input.multiple = true;
-    input.addEventListener('change', async () => {
-      for (const file of [...input.files]) await uploadTrack(file);
-    });
-    input.click();
+  addInput.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const value = addInput.value.trim();
+      if (!value) return;
+      await addSoundCloudTrack(value);
+      hideAddInput();
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideAddInput();
+    }
+  });
+
+  addInput.addEventListener('blur', () => {
+    if (!addInput.value.trim()) {
+      hideAddInput();
+    }
+  });
+
+  searchBtn.addEventListener('click', () => {
+    const query = addInput.classList.contains('is-visible')
+      ? (addInput.value.trim() || 'music')
+      : 'music';
+    window.open(`https://soundcloud.com/search?q=${encodeURIComponent(query)}`, '_blank');
   });
 
   musicShuffle.addEventListener('click', () => {
     isShuffled = !isShuffled;
-    musicShuffle.classList.toggle('active', isShuffled);
+    updatePlaybackModeButtons();
   });
 
   musicLoop.addEventListener('click', () => {
-    isLooping = !isLooping;
-    musicLoop.classList.toggle('active', isLooping);
+    if (loopMode === LOOP_MODE_OFF) {
+      loopMode = LOOP_MODE_TRACK;
+    } else if (loopMode === LOOP_MODE_TRACK) {
+      loopMode = LOOP_MODE_PLAYLIST;
+    } else {
+      loopMode = LOOP_MODE_OFF;
+    }
+
+    updatePlaybackModeButtons();
   });
 
   await loadTracks();

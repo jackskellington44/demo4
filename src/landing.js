@@ -1,7 +1,22 @@
+// ============================================
+// LANDING.JS FILE MAP
+// 0. PROFILE PICTURE GRID SETUP
+// 1. DOM REFERENCES
+// 2. UI STATE
+// 3. VIEW TOGGLE (LOGIN/SIGNUP)
+// 4. PFP SELECTION AND UPLOAD
+// 5. FORM VALIDATION
+// 6. LOGIN FLOW
+// 7. SIGNUP FLOW
+// 8. KEYBOARD SUBMISSION
+// 9. APP BOOTSTRAP
+// ============================================
+
 import { supabase } from './supabase-config.js';
+import { installPrettyAlerts } from './ui-alerts.js';
 
 // ============================================
-// PFP CONFIGURATION
+// 0. PROFILE PICTURE GRID SETUP
 // ============================================
 
 const PFP_LIST = [
@@ -10,6 +25,74 @@ const PFP_LIST = [
   'pfp11.webp', 'pfp12.webp', 'pfp13.webp', 'pfp14.webp', 'pfp15.webp',
   'pfp16.webp', 'pfp17.webp', 'pfp18.webp', 'pfp19.webp'
 ];
+
+const MAX_PFP_UPLOAD_BYTES = 2 * 1024 * 1024;
+const ALLOWED_PFP_MIME_TYPES = new Set([
+  'image/webp',
+  'image/gif',
+  'image/png',
+  'image/jpeg'
+]);
+
+function hashStringDjb2(input) {
+  let hash = 5381;
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) + hash) + input.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function toUsernameKey(username) {
+  return String(username || '').trim().toLowerCase();
+}
+
+function makeInternalEmail(username) {
+  const key = toUsernameKey(username);
+  const slug = key.replace(/[^a-z0-9]/g, '_').slice(0, 12) || 'user';
+  const hash = hashStringDjb2(key);
+  return `u_${slug}_${hash}@grp.io`;
+}
+
+function getPfpValidationError(file) {
+  if (!file) return null;
+
+  if (!ALLOWED_PFP_MIME_TYPES.has(file.type)) {
+    return 'Profile picture must be webp, gif, png, or jpeg.';
+  }
+
+  if (file.size > MAX_PFP_UPLOAD_BYTES) {
+    return 'Profile picture must be 2 MB or smaller.';
+  }
+
+  return null;
+}
+
+function drawImageSafely(ctx, img) {
+  try {
+    ctx.drawImage(img, 0, 0, 200, 200);
+  } catch (e) {
+    console.warn('Unable to draw profile picture frame', e);
+  }
+}
+
+function freezeContainerFrame(container) {
+  const img = container.querySelector('img');
+  const cvs = container.querySelector('canvas');
+  if (img && cvs && img.naturalWidth > 0) {
+    const ctx = cvs.getContext('2d');
+    if (ctx) drawImageSafely(ctx, img);
+    img.classList.remove('pfp-playing');
+  }
+}
+
+function deselectPFPContainers() {
+  pfpContainers.forEach(container => {
+    if (container.classList.contains('selected')) {
+      freezeContainerFrame(container);
+    }
+    container.classList.remove('selected');
+  });
+}
 
 function loadPFPGrid() {
   const pfpGrid = document.getElementById('pfpGrid');
@@ -31,7 +114,7 @@ function loadPFPGrid() {
     img.alt = pfpName;
 
     const drawFrame = () => {
-      try { ctx.drawImage(img, 0, 0, 200, 200); } catch(e) {}
+      drawImageSafely(ctx, img);
     };
 
     if (img.complete && img.naturalWidth > 0) drawFrame();
@@ -53,7 +136,7 @@ function loadPFPGrid() {
     pfpGrid.appendChild(container);
   });
 
-  // Upload button
+  // Add upload tile at the end of the grid
   const uploadContainer = document.createElement('div');
   uploadContainer.className = 'upload-pfp-container';
   uploadContainer.id = 'uploadPFPButton';
@@ -62,7 +145,7 @@ function loadPFPGrid() {
 }
 
 // ============================================
-// DOM ELEMENT REFERENCES
+// 1. DOM REFERENCES
 // ============================================
 
 const loginToggle    = document.getElementById('loginToggle');
@@ -80,14 +163,15 @@ let pfpContainers  = null;
 let uploadPFPButton = null;
 
 // ============================================
-// STATE
+// 2. UI STATE
 // ============================================
 
 let selectedPFP     = null;
 let uploadedPFPFile = null;
+let signupInFlight  = false;
 
 // ============================================
-// 1. VIEW MANAGEMENT
+// 3. VIEW TOGGLE (LOGIN/SIGNUP)
 // ============================================
 
 function setActiveView(view) {
@@ -113,7 +197,7 @@ function initializeViews() {
 }
 
 // ============================================
-// 2. PFP SELECTION
+// 4. PFP SELECTION AND UPLOAD
 // ============================================
 
 function initializePFPSelection() {
@@ -122,18 +206,8 @@ function initializePFPSelection() {
 
   pfpContainers.forEach(container => {
     container.addEventListener('click', function () {
-      // Deselect all — freeze previously selected
-      pfpContainers.forEach(p => {
-        if (p.classList.contains('selected')) {
-          const img = p.querySelector('img');
-          const cvs = p.querySelector('canvas');
-          if (img && cvs && img.naturalWidth > 0) {
-            try { cvs.getContext('2d').drawImage(img, 0, 0, 200, 200); } catch(e) {}
-            img.classList.remove('pfp-playing');
-          }
-        }
-        p.classList.remove('selected');
-      });
+      // Deselect all and freeze the previously selected animated frame
+      deselectPFPContainers();
       uploadPFPButton.classList.remove('selected');
 
       this.classList.add('selected');
@@ -153,18 +227,15 @@ function initializePFPUpload() {
     const file = e.target.files[0];
     if (!file) return;
 
+    const pfpError = getPfpValidationError(file);
+    if (pfpError) {
+      alert(pfpError);
+      pfpUpload.value = '';
+      return;
+    }
+
     // Deselect grid items
-    pfpContainers.forEach(p => {
-      if (p.classList.contains('selected')) {
-        const img = p.querySelector('img');
-        const cvs = p.querySelector('canvas');
-        if (img && cvs && img.naturalWidth > 0) {
-          try { cvs.getContext('2d').drawImage(img, 0, 0, 200, 200); } catch(e) {}
-          img.classList.remove('pfp-playing');
-        }
-      }
-      p.classList.remove('selected');
-    });
+    deselectPFPContainers();
 
     uploadPFPButton.classList.add('selected');
     uploadPFPButton.innerHTML = '<span>✓</span>';
@@ -174,7 +245,7 @@ function initializePFPUpload() {
 }
 
 // ============================================
-// 3. FORM VALIDATION
+// 5. FORM VALIDATION
 // ============================================
 
 function validateLoginForm() {
@@ -189,11 +260,15 @@ function validateSignupForm() {
   if (!signupPassword.value)  { alert('Please enter a password'); return false; }
   if (signupPassword.value.length < 6) { alert('Password must be at least 6 characters'); return false; }
   if (!selectedPFP && !uploadedPFPFile) { alert('Please select or upload a profile picture'); return false; }
+  if (uploadedPFPFile) {
+    const pfpError = getPfpValidationError(uploadedPFPFile);
+    if (pfpError) { alert(pfpError); return false; }
+  }
   return true;
 }
 
 // ============================================
-// 4. LOGIN
+// 6. LOGIN FLOW
 // ============================================
 
 async function handleLogin() {
@@ -225,43 +300,158 @@ async function handleLogin() {
 }
 
 // ============================================
-// 5. SIGNUP
+// 7. SIGNUP FLOW
 // ============================================
 
 async function handleSignup() {
+  if (signupInFlight) return;
   if (!validateSignupForm()) return;
+
+  signupInFlight = true;
   const username = signupUsername.value.trim();
   const password = signupPassword.value;
 
+  // Track created resources so we can roll back partial work on failure.
+  let createdUserId = null;
+  let insertedUserRow = false;
+  let uploadedPfpPath = null;
+  let signedIn = false;
+
+  const setSignupUIBusy = (busy) => {
+    signupToggle.disabled = busy;
+    loginToggle.disabled = busy;
+    signupUsername.disabled = busy;
+    signupPassword.disabled = busy;
+    if (pfpUpload) pfpUpload.disabled = busy;
+    if (uploadPFPButton) uploadPFPButton.style.pointerEvents = busy ? 'none' : '';
+    if (pfpContainers) {
+      pfpContainers.forEach(container => {
+        container.style.pointerEvents = busy ? 'none' : '';
+      });
+    }
+  };
+
+  const rollbackSignupArtifacts = async () => {
+    if (uploadedPfpPath) {
+      const { error: removePfpErr } = await supabase.storage
+        .from('group4-pfps')
+        .remove([uploadedPfpPath]);
+      if (removePfpErr) {
+        console.warn('Rollback warning: could not remove uploaded profile picture', removePfpErr.message);
+      }
+    }
+
+    if (insertedUserRow && createdUserId) {
+      const { error: deleteUserErr } = await supabase
+        .from('users')
+        .delete()
+        .eq('id', createdUserId);
+      if (deleteUserErr) {
+        console.warn('Rollback warning: could not remove users row', deleteUserErr.message);
+      }
+    }
+
+    if (signedIn) {
+      const { error: signOutErr } = await supabase.auth.signOut();
+      if (signOutErr) {
+        console.warn('Rollback warning: could not sign out after failed signup', signOutErr.message);
+      }
+    }
+  };
+
   try {
-    // Check uniqueness
-    const { data: existing } = await supabase
+    setSignupUIBusy(true);
+
+    // Quick pre-check for a friendlier message (DB unique index is still authoritative).
+    const { data: existing, error: lookupErr } = await supabase
       .from('users')
       .select('id')
       .eq('username', username)
       .maybeSingle();
+    if (lookupErr) throw lookupErr;
     if (existing) { alert('Username already taken'); return; }
 
-    // Generate opaque internal email (never shown to user)
-    const internalEmail = `u_${Date.now()}_${Math.random().toString(36).slice(2, 8)}@grp.io`;
+    // Deterministic internal email makes retries idempotent for the same username.
+    const internalEmail = makeInternalEmail(username);
 
-    const { data, error } = await supabase.auth.signUp({ email: internalEmail, password });
-    if (error) throw error;
-    const userId = data.user.id;
+    let userId = null;
 
-    // Sign in immediately
-    const { error: signInErr } = await supabase.auth.signInWithPassword({ email: internalEmail, password });
-    if (signInErr) throw signInErr;
+    const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
+      email: internalEmail,
+      password
+    });
+
+    if (signUpErr) {
+      const normalizedMessage = String(signUpErr.message || '').toLowerCase();
+      const alreadyExists = normalizedMessage.includes('already') || normalizedMessage.includes('registered');
+
+      if (!alreadyExists) throw signUpErr;
+
+      // Existing auth account for this username key: try idempotent resume with provided password.
+      const { data: resumeSignInData, error: resumeSignInErr } = await supabase.auth.signInWithPassword({
+        email: internalEmail,
+        password
+      });
+      if (resumeSignInErr) {
+        throw new Error('Username already taken');
+      }
+
+      userId = resumeSignInData?.user?.id || null;
+      signedIn = true;
+    } else {
+      if (!signUpData?.user?.id) {
+        throw new Error('Signup failed: user account was not created.');
+      }
+
+      userId = signUpData.user.id;
+      createdUserId = userId;
+
+      const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+        email: internalEmail,
+        password
+      });
+      if (signInErr) throw signInErr;
+      if (!userId && signInData?.user?.id) userId = signInData.user.id;
+      signedIn = true;
+    }
+
+    if (!userId) {
+      const { data: meData, error: meErr } = await supabase.auth.getUser();
+      if (meErr || !meData?.user?.id) {
+        throw new Error('Signup failed: missing authenticated user context.');
+      }
+      userId = meData.user.id;
+    }
+
+    const { data: existingUserRow, error: existingUserRowErr } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', userId)
+      .maybeSingle();
+    if (existingUserRowErr) throw existingUserRowErr;
+
+    // Prior successful completion for this account: treat as idempotent success.
+    if (existingUserRow) {
+      window.location.href = './main.html';
+      return;
+    }
 
     // Upload custom pfp if provided
     let pfpURL = null;
     if (uploadedPFPFile) {
-      const ext  = uploadedPFPFile.name.split('.').pop() || 'webp';
+      const extMap = {
+        'image/webp': 'webp',
+        'image/gif': 'gif',
+        'image/png': 'png',
+        'image/jpeg': 'jpg'
+      };
+      const ext = extMap[uploadedPFPFile.type] || 'webp';
       const path = `${userId}.${ext}`;
       const { error: upErr } = await supabase.storage
         .from('group4-pfps')
         .upload(path, uploadedPFPFile);
       if (upErr) throw upErr;
+      uploadedPfpPath = path;
       const { data: urlData } = supabase.storage.from('group4-pfps').getPublicUrl(path);
       pfpURL = urlData.publicUrl;
     }
@@ -273,20 +463,30 @@ async function handleSignup() {
       email:      internalEmail,
       pfp:        selectedPFP  || null,
       pfp_url:    pfpURL       || null,
-      created_at: new Date(),
-      updated_at: new Date()
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     }]);
-    if (dbErr) throw dbErr;
+    if (dbErr) {
+      if (dbErr.code === '23505') {
+        throw new Error('Username already taken');
+      }
+      throw dbErr;
+    }
+    insertedUserRow = true;
 
     window.location.href = './main.html';
   } catch (error) {
+    await rollbackSignupArtifacts();
     console.error('Signup error:', error.message);
     alert(`Signup failed: ${error.message}`);
+  } finally {
+    setSignupUIBusy(false);
+    signupInFlight = false;
   }
 }
 
 // ============================================
-// 6. ENTER KEY
+// 8. KEYBOARD SUBMISSION
 // ============================================
 
 function handleEnterKey(e) {
@@ -298,15 +498,17 @@ function handleEnterKey(e) {
 
 function initializeFormSubmission() {
   document.querySelectorAll('input').forEach(input => {
-    input.addEventListener('keypress', handleEnterKey);
+    input.addEventListener('keydown', handleEnterKey);
   });
 }
 
 // ============================================
-// 7. INIT
+// 9. APP BOOTSTRAP
 // ============================================
 
 document.addEventListener('DOMContentLoaded', () => {
+  installPrettyAlerts({ baseUrl: import.meta.env.BASE_URL });
+
   document.documentElement.style.setProperty(
     '--bg-url',
     `url(${import.meta.env.BASE_URL}images/background.jpg)`

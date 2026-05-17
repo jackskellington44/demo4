@@ -1,42 +1,68 @@
 <!DOCTYPE html>
 <html lang="en">
+<!-- ================================================ -->
+<!-- MONKEY SPACE - Login/Signup Page               -->
+<!-- ================================================ -->
+<!--                                                  -->
+<!-- PAGE STRUCTURE:                                 -->
+<!--  1. Header + Meta Tags                          -->
+<!--  2. Main Container                              -->
+<!--  3. Top Section (PFP Selection)                 -->
+<!--  4. Bottom Section (Login/Signup Forms)         -->
+<!--  5. Hidden Elements                             -->
+<!--  6. Scripts                                     -->
+<!--                                                  -->
+<!-- ================================================ -->
+
 <head>
+    <!-- ================================================ -->
+    <!-- 1. META TAGS & RESOURCES                         -->
+    <!-- ================================================ -->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>space mates</title>
+    <title>monkey space</title>
     <link rel="icon" href="public/images/favicon.png" />
     <link rel="stylesheet" href="./style.css">
 </head>
+
 <body>
+    <!-- ================================================ -->
+    <!-- 2. MAIN CONTAINER                               -->
+    <!-- ================================================ -->
     <div class="main-container" id="mainContainer">
         
-        <!-- Top Container (PFP section) -->
+        <!-- ============================================ -->
+        <!-- 3. TOP SECTION - PFP SELECTION              -->
+        <!-- ============================================ -->
         <div class="main-inner-top-container" id="topContainer">
             <div class="pfp-selection-container" id="pfpSelection" style="display: none;">
+                <!-- PFP grid for profile picture selection -->
                 <div class="pfp-grid" id="pfpGrid">
                     <!-- PFPs will be loaded dynamically from config -->
                 </div>
             </div>
         </div>
 
-        <!-- Bottom Container -->
+        <!-- ============================================ -->
+        <!-- 4. BOTTOM SECTION - LOGIN/SIGNUP FORMS      -->
+        <!-- ============================================ -->
         <div class="main-inner-bottom-container">
-            <!-- Left side - Inputs -->
+            <!-- Left side: Input fields -->
             <div class="main-inner-bottom-left" id="inputContainer">
-                <!-- Login inputs -->
+                <!-- Login form (visible by default) -->
                 <div class="input-group" id="loginInputs">
-                    <input type="text" class="input-line" id="loginUsername" autocomplete="off">
-                    <input type="password" class="input-line" id="loginPassword" autocomplete="off">
+                    <input type="text" class="input-line" id="loginUsername" autocomplete="off" placeholder="username">
+                    <input type="password" class="input-line" id="loginPassword" autocomplete="off" placeholder="password">
                 </div>
                 
-                <!-- Signup inputs -->
+                <!-- Signup form (hidden by default) -->
                 <div class="input-group" id="signupInputs" style="display: none;">
-                    <input type="text" class="input-line" id="signupUsername" autocomplete="off">
-                    <input type="password" class="input-line" id="signupPassword" autocomplete="off">
+                    <input type="text" class="input-line" id="signupUsername" autocomplete="off" placeholder="username">
+                    <input type="password" class="input-line" id="signupPassword" autocomplete="off" placeholder="password">
                 </div>
             </div>
 
-            <!-- Right side - Toggle buttons -->
+            <!-- Right side: Toggle buttons -->
             <div class="main-inner-bottom-right">
                 <button class="view-toggle active" id="loginToggle">login</button>
                 <button class="view-toggle" id="signupToggle">signup</button>
@@ -44,12 +70,15 @@
         </div>
     </div>
 
-    <!-- Upload input (hidden) -->
+    <!-- ================================================ -->
+    <!-- 5. HIDDEN ELEMENTS                              -->
+    <!-- ================================================ -->
+    <!-- Hidden file input for PFP upload -->
     <input type="file" id="pfpUpload" accept="image/webp,image/gif,image/*" style="display: none;">
 
-    <!-- Main script -->
+    <!-- ================================================ -->
+    <!-- 6. SCRIPTS                                      -->
+    <!-- ================================================ -->
     <script type="module" src="/src/landing.js"></script>
-
-
 </body>
 </html>
